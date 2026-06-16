@@ -40,6 +40,30 @@ canon-webcam stream
 
 Open your video app and select `Canon-Webcam` or `/dev/video42`.
 
+## Kubuntu Launchers
+
+The installer adds three Plasma application launcher entries:
+
+- `Start Canon Webcam`
+- `Stop Canon Webcam`
+- `Canon Webcam Status`
+
+Use the application launcher menu to start and stop the systemd user service
+without opening a terminal. The launcher commands show Plasma notifications for
+success or failure.
+
+Refresh the launchers without reinstalling packages:
+
+```bash
+canon-webcam install-launchers
+```
+
+Remove only the launchers:
+
+```bash
+canon-webcam remove-launchers
+```
+
 ## Systemd User Service
 
 The installer also creates a systemd user service. Start it after connecting the
@@ -108,5 +132,5 @@ when capture starts.
 canon-webcam uninstall
 ```
 
-This removes the installed command, systemd user service, and loopback config.
-It leaves apt packages installed.
+This removes the installed command, systemd user service, Plasma launchers, and
+loopback config. It leaves apt packages installed.

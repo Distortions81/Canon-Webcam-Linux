@@ -39,7 +39,7 @@ usage() {
 Usage:
   canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--enable] [--start]
   canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N]
-  canon-webcam start|stop|restart|status|logs|doctor|uninstall
+  canon-webcam start|stop|restart|status|logs|doctor|install-launchers|remove-launchers|uninstall
 
 What it does:
   install   Install packages, configure v4l2loopback, install a user service.
@@ -50,6 +50,10 @@ What it does:
   status    Show the systemd user service status.
   logs      Follow service logs.
   doctor    Check dependencies, loopback device, service, and camera detection.
+  install-launchers
+            Install or refresh Kubuntu/Plasma application launcher entries.
+  remove-launchers
+            Remove Kubuntu/Plasma application launcher entries.
   uninstall Remove files created by this script. Packages are left installed.
 
 Defaults:
@@ -138,6 +142,21 @@ systemctl_user() {
   systemctl --user "$@"
 }
 
+notify_desktop() {
+  local summary="$1"
+  local body="$2"
+
+  if command -v notify-send >/dev/null 2>&1 && notify-send "$summary" "$body"; then
+    return
+  fi
+
+  log "$summary: $body"
+}
+
+desktop_app_dir() {
+  printf '%s/applications\n' "${XDG_DATA_HOME:-$HOME/.local/share}"
+}
+
 warn_if_not_ubuntu_2404() {
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -177,6 +196,8 @@ install_packages() {
     v4l2loopback-dkms
     v4l2loopback-utils
     v4l-utils
+    desktop-file-utils
+    libnotify-bin
   )
 
   if [[ ! -e "/lib/modules/$(uname -r)/build" ]]; then
@@ -282,6 +303,92 @@ SERVICE
   fi
 }
 
+write_desktop_launcher() {
+  local filename="$1"
+  local name="$2"
+  local comment="$3"
+  local exec_args="$4"
+  local icon="$5"
+  local app_dir tmp
+
+  app_dir="$(desktop_app_dir)"
+  mkdir -p "$app_dir"
+
+  tmp="$(mktemp)"
+  cat >"$tmp" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=${name}
+Comment=${comment}
+Exec=${INSTALL_PATH} ${exec_args}
+Icon=${icon}
+Terminal=false
+Categories=AudioVideo;Video;
+StartupNotify=false
+DESKTOP
+
+  install -m 0644 "$tmp" "$app_dir/$filename"
+  rm -f "$tmp"
+}
+
+refresh_desktop_launchers() {
+  local app_dir
+  app_dir="$(desktop_app_dir)"
+
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$app_dir" >/dev/null 2>&1 || true
+  fi
+
+  if command -v kbuildsycoca6 >/dev/null 2>&1; then
+    kbuildsycoca6 >/dev/null 2>&1 || true
+  elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+    kbuildsycoca5 >/dev/null 2>&1 || true
+  fi
+}
+
+install_desktop_launchers() {
+  if [[ ! -x "$INSTALL_PATH" ]]; then
+    warn "launchers point to $INSTALL_PATH, but that command is not installed yet"
+  fi
+
+  write_desktop_launcher \
+    "canon-webcam-start.desktop" \
+    "Start Canon Webcam" \
+    "Start the Canon camera virtual webcam service" \
+    "launcher-start" \
+    "camera-web"
+
+  write_desktop_launcher \
+    "canon-webcam-stop.desktop" \
+    "Stop Canon Webcam" \
+    "Stop the Canon camera virtual webcam service" \
+    "launcher-stop" \
+    "media-playback-stop"
+
+  write_desktop_launcher \
+    "canon-webcam-status.desktop" \
+    "Canon Webcam Status" \
+    "Show whether the Canon camera virtual webcam service is running" \
+    "launcher-status" \
+    "dialog-information"
+
+  refresh_desktop_launchers
+  log "Installed application launchers in $(desktop_app_dir)"
+}
+
+remove_desktop_launchers() {
+  local app_dir
+  app_dir="$(desktop_app_dir)"
+
+  rm -f \
+    "$app_dir/canon-webcam-start.desktop" \
+    "$app_dir/canon-webcam-stop.desktop" \
+    "$app_dir/canon-webcam-status.desktop"
+
+  refresh_desktop_launchers
+  log "Removed application launchers from $app_dir"
+}
+
 install_all() {
   require_not_root
   warn_if_not_ubuntu_2404
@@ -301,6 +408,7 @@ install_all() {
   load_loopback_now
   ensure_video_group
   install_user_service
+  install_desktop_launchers
 
   if [[ "$ENABLE_SERVICE" -eq 1 ]]; then
     log "Enabling $SERVICE_NAME"
@@ -313,6 +421,7 @@ install_all() {
   fi
 
   log "Install complete. Connect the camera by USB, set it to movie/live-view capable mode, then run: canon-webcam doctor"
+  log "Kubuntu launchers are available as Start Canon Webcam, Stop Canon Webcam, and Canon Webcam Status."
 }
 
 stop_camera_mount_helpers() {
@@ -381,6 +490,37 @@ service_status() {
 
 service_logs() {
   journalctl --user -u "$SERVICE_NAME" -f
+}
+
+launcher_start() {
+  if service_start; then
+    notify_desktop "Canon Webcam" "Started. Select ${CARD_LABEL} in your video app."
+  else
+    notify_desktop "Canon Webcam" "Start failed. Run canon-webcam logs for details."
+    return 1
+  fi
+}
+
+launcher_stop() {
+  if service_stop; then
+    notify_desktop "Canon Webcam" "Stopped."
+  else
+    notify_desktop "Canon Webcam" "Stop failed. Run canon-webcam status for details."
+    return 1
+  fi
+}
+
+launcher_status() {
+  local service_file="$HOME/.config/systemd/user/$SERVICE_NAME"
+
+  if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+    notify_desktop "Canon Webcam" "Running. Select ${CARD_LABEL} in your video app."
+  elif [[ -f "$service_file" ]]; then
+    notify_desktop "Canon Webcam" "Stopped."
+  else
+    notify_desktop "Canon Webcam" "Not installed. Run canon-webcam install first."
+    return 1
+  fi
 }
 
 doctor() {
@@ -464,6 +604,7 @@ uninstall_all() {
   systemctl_user disable "$SERVICE_NAME" >/dev/null 2>&1 || true
   rm -f "$HOME/.config/systemd/user/$SERVICE_NAME"
   systemctl_user daemon-reload >/dev/null 2>&1 || true
+  remove_desktop_launchers
 
   sudo rm -f \
     "$INSTALL_PATH" \
@@ -505,6 +646,21 @@ main() {
       ;;
     doctor)
       doctor
+      ;;
+    install-launchers)
+      install_desktop_launchers
+      ;;
+    remove-launchers)
+      remove_desktop_launchers
+      ;;
+    launcher-start)
+      launcher_start
+      ;;
+    launcher-stop)
+      launcher_stop
+      ;;
+    launcher-status)
+      launcher_status
       ;;
     uninstall)
       uninstall_all
