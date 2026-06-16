@@ -39,7 +39,7 @@ usage() {
 Usage:
   canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--enable] [--start]
   canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N]
-  canon-webcam start|stop|restart|status|logs|doctor|reset-loopback|install-launchers|remove-launchers|uninstall
+  canon-webcam start|stop|restart|status|logs|doctor|reset-loopback|test-source|install-launchers|remove-launchers|uninstall
 
 What it does:
   install   Install packages, configure v4l2loopback, install a user service.
@@ -52,6 +52,8 @@ What it does:
   doctor    Check dependencies, loopback device, service, and camera detection.
   reset-loopback
             Stop the service, reload v4l2loopback with sudo/pkexec, and verify it is writable.
+  test-source
+            Stream a generated test pattern to the virtual webcam.
   install-launchers
             Install or refresh Kubuntu/Plasma application launcher entries.
   remove-launchers
@@ -400,8 +402,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS}
-Restart=on-failure
-RestartSec=3
+Restart=no
 
 [Install]
 WantedBy=default.target
@@ -548,6 +549,30 @@ camera_detected() {
   gphoto2 --auto-detect | awk 'NR > 2 && NF { found = 1 } END { exit !found }'
 }
 
+camera_set_config() {
+  local config="$1"
+
+  timeout 5 gphoto2 --set-config "$config" >/dev/null 2>&1 || true
+}
+
+stream_test_source() {
+  need_cmd ffmpeg
+
+  ensure_loopback_for_writer
+  log "Streaming generated test pattern to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
+  log "Open Zoom and select '${CARD_LABEL}' or '$DEVICE'. Press Ctrl+C to stop."
+
+  ffmpeg \
+    -hide_banner \
+    -loglevel warning \
+    -re \
+    -f lavfi \
+    -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
+    -vf format=yuv420p \
+    -f v4l2 \
+    "$DEVICE"
+}
+
 stream_camera() {
   local fifo gphoto_pid ffmpeg_pid status
 
@@ -563,8 +588,8 @@ stream_camera() {
   fi
 
   # Best effort for EOS bodies. Compact cameras and non-EOS models may not expose these config keys.
-  gphoto2 --set-config eosviewfinder=1 >/dev/null 2>&1 || true
-  gphoto2 --set-config viewfinder=1 >/dev/null 2>&1 || true
+  camera_set_config eosviewfinder=1
+  camera_set_config viewfinder=1
 
   log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
   log "Select '${CARD_LABEL}' or '$DEVICE' in your video app. Press Ctrl+C to stop foreground streaming."
@@ -669,6 +694,7 @@ launcher_status() {
 doctor() {
   local problems=0
   local service_file="$HOME/.config/systemd/user/$SERVICE_NAME"
+  local self
   local v4l_output=""
 
   printf 'System:\n'
@@ -689,6 +715,19 @@ doctor() {
     fi
   done
 
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  if [[ "$self" != "$INSTALL_PATH" ]]; then
+    if [[ -x "$INSTALL_PATH" ]] && cmp -s "$self" "$INSTALL_PATH"; then
+      printf '  ok: installed command is current -> %s\n' "$INSTALL_PATH"
+    elif [[ -x "$INSTALL_PATH" ]]; then
+      printf '  missing: installed command differs from this script; run ./canon-webcam.sh install\n'
+      problems=1
+    else
+      printf '  missing: installed command is not present; run ./canon-webcam.sh install\n'
+      problems=1
+    fi
+  fi
+
   printf '\nLoopback:\n'
   if loopback_loaded; then
     printf '  ok: v4l2loopback module is loaded\n'
@@ -705,13 +744,8 @@ doctor() {
   fi
 
   if [[ -c "$DEVICE" ]] && command -v v4l2-ctl >/dev/null 2>&1; then
-    if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-      if v4l2-ctl --device "$DEVICE" --get-fmt-video >/dev/null 2>&1; then
-        printf '  ok: %s has an active video format\n' "$DEVICE"
-      else
-        printf '  missing: %s has no active video format; run canon-webcam restart\n' "$DEVICE"
-        problems=1
-      fi
+    if v4l2-ctl --device "$DEVICE" --get-fmt-video >/dev/null 2>&1; then
+      printf '  ok: %s has an active video format\n' "$DEVICE"
     elif loopback_writer_ready; then
       printf '  ok: %s is ready for ffmpeg input\n' "$DEVICE"
     else
@@ -734,6 +768,12 @@ doctor() {
     gphoto2 --auto-detect || true
     if camera_detected; then
       printf '  ok: gphoto2 sees a camera\n'
+      if timeout 8 gphoto2 --summary >/dev/null 2>&1; then
+        printf '  ok: camera responds to PTP commands\n'
+      else
+        printf '  missing: camera is detected but not responding to PTP commands; power-cycle it and reconnect USB\n'
+        problems=1
+      fi
     else
       printf '  missing: gphoto2 does not see a camera\n'
       problems=1
@@ -808,6 +848,9 @@ main() {
       ;;
     reset-loopback)
       reset_loopback
+      ;;
+    test-source)
+      stream_test_source
       ;;
     install-launchers)
       install_desktop_launchers

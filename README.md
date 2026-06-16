@@ -119,13 +119,25 @@ If Zoom does not show `Canon-Webcam`, close Zoom, then run:
 
 ```bash
 canon-webcam reset-loopback
+canon-webcam test-source
+```
+
+Reopen Zoom and check the camera list while the generated test pattern is
+running. If Zoom shows `Canon-Webcam`, the virtual webcam is working. Stop the
+test with `Ctrl+C`, then start the Canon feed:
+
+```bash
 canon-webcam start
 ```
 
-After the start command succeeds, reopen Zoom and check the camera list again.
 The reset command stops the webcam service and reloads `v4l2loopback`; it may
 ask for your password through `sudo` or a graphical Kubuntu authorization
 prompt.
+
+If `canon-webcam doctor` says the camera is detected but not responding to PTP
+commands, turn the camera off, unplug USB, wait a few seconds, turn the camera
+back on in movie/live-view mode, reconnect USB, and run `canon-webcam start`
+again.
 
 If `gphoto2` does not detect the camera, check that the USB cable carries data,
 the camera is on, Wi-Fi mode is off, and the camera is in PTP/PC Remote mode if
