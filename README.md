@@ -74,6 +74,10 @@ canon-webcam start
 canon-webcam status
 ```
 
+If the Canon camera is not detected or live view fails, the service keeps the
+virtual webcam visible with a generated test pattern. That makes `Canon-Webcam`
+appear in Zoom and other apps while you fix the camera connection.
+
 Stop it when finished:
 
 ```bash
@@ -119,16 +123,20 @@ If Zoom does not show `Canon-Webcam`, close Zoom, then run:
 
 ```bash
 canon-webcam reset-loopback
+canon-webcam start
+```
+
+Reopen Zoom and check the camera list while the service is running. If the Canon
+camera is unavailable, the service writes a generated test pattern so the
+virtual webcam is still visible.
+
+You can also test the virtual webcam without the service:
+
+```bash
 canon-webcam test-source
 ```
 
-Reopen Zoom and check the camera list while the generated test pattern is
-running. If Zoom shows `Canon-Webcam`, the virtual webcam is working. Stop the
-test with `Ctrl+C`, then start the Canon feed:
-
-```bash
-canon-webcam start
-```
+Stop the test with `Ctrl+C`.
 
 The reset command stops the webcam service and reloads `v4l2loopback`; it may
 ask for your password through `sudo` or a graphical Kubuntu authorization

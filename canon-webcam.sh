@@ -321,9 +321,13 @@ reset_loopback() {
   need_cmd sudo
 
   if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-    was_active=1
-    log "Stopping $SERVICE_NAME before resetting v4l2loopback"
-    systemctl_user stop "$SERVICE_NAME"
+    if [[ "${CANON_WEBCAM_IN_SERVICE:-0}" == "1" ]]; then
+      warn "$SERVICE_NAME is already active; resetting loopback from inside the running service"
+    else
+      was_active=1
+      log "Stopping $SERVICE_NAME before resetting v4l2loopback"
+      systemctl_user stop "$SERVICE_NAME"
+    fi
   fi
 
   if [[ -c "$DEVICE" ]] && command -v fuser >/dev/null 2>&1 && fuser "$DEVICE" >/dev/null 2>&1; then
@@ -401,6 +405,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
+Environment=CANON_WEBCAM_IN_SERVICE=1
 ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS}
 Restart=no
 
@@ -580,11 +585,14 @@ stream_camera() {
   need_cmd ffmpeg
 
   [[ -c "$DEVICE" ]] || die "$DEVICE does not exist. Run 'canon-webcam install' and reboot if the loopback module was just built."
+  ensure_loopback_for_writer
 
   stop_camera_mount_helpers
 
   if ! camera_detected; then
-    die "no gphoto2-compatible camera detected. Connect the Canon camera by USB, disable Wi-Fi mode, and choose PTP/PC Remote mode if the camera asks."
+    warn "no gphoto2-compatible camera detected; keeping $DEVICE visible with a generated test pattern"
+    stream_test_source
+    return
   fi
 
   # Best effort for EOS bodies. Compact cameras and non-EOS models may not expose these config keys.
@@ -601,7 +609,8 @@ stream_camera() {
     kill "${gphoto_pid:-}" "${ffmpeg_pid:-}" >/dev/null 2>&1 || true
     rm -f "$fifo"
   }
-  trap cleanup_stream EXIT INT TERM
+  trap cleanup_stream EXIT
+  trap 'cleanup_stream; exit 0' INT TERM
 
   gphoto2 --stdout --capture-movie >"$fifo" &
   gphoto_pid="$!"
@@ -630,7 +639,14 @@ stream_camera() {
   fi
   cleanup_stream
   trap - EXIT INT TERM
-  return "$status"
+
+  if [[ "$status" -eq 0 ]]; then
+    warn "Canon stream ended; keeping $DEVICE visible with a generated test pattern"
+  else
+    warn "Canon stream failed with status $status; keeping $DEVICE visible with a generated test pattern"
+  fi
+
+  stream_test_source
 }
 
 service_start() {
