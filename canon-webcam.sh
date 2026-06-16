@@ -245,7 +245,7 @@ install_binary() {
   local self
   self="$(readlink -f "${BASH_SOURCE[0]}")"
   log "Installing command to $INSTALL_PATH"
-  sudo install -m 0755 "$self" "$INSTALL_PATH"
+  run_privileged install -m 0755 "$self" "$INSTALL_PATH"
 }
 
 write_root_file() {
@@ -420,6 +420,25 @@ SERVICE
   if ! systemctl_user daemon-reload; then
     warn "systemctl --user daemon-reload failed. Log into a graphical session and run it again."
   fi
+}
+
+ensure_runtime_installed_current() {
+  local self
+
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  if [[ "$self" == "$INSTALL_PATH" ]]; then
+    return
+  fi
+
+  if [[ -x "$INSTALL_PATH" ]] && cmp -s "$self" "$INSTALL_PATH"; then
+    install_user_service
+    return
+  fi
+
+  warn "installed command is not current; updating $INSTALL_PATH before starting"
+  install_binary
+  install_user_service
+  install_desktop_launchers
 }
 
 write_desktop_launcher() {
@@ -650,6 +669,8 @@ stream_camera() {
 }
 
 service_start() {
+  ensure_runtime_installed_current
+
   if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
     return 0
   fi
