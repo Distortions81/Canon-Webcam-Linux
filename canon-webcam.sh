@@ -39,7 +39,7 @@ usage() {
 Usage:
   canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--enable] [--start]
   canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N]
-  canon-webcam start|stop|restart|status|logs|doctor|install-launchers|remove-launchers|uninstall
+  canon-webcam start|stop|restart|status|logs|doctor|reset-loopback|install-launchers|remove-launchers|uninstall
 
 What it does:
   install   Install packages, configure v4l2loopback, install a user service.
@@ -50,6 +50,8 @@ What it does:
   status    Show the systemd user service status.
   logs      Follow service logs.
   doctor    Check dependencies, loopback device, service, and camera detection.
+  reset-loopback
+            Stop the service, reload v4l2loopback with sudo/pkexec, and verify it is writable.
   install-launchers
             Install or refresh Kubuntu/Plasma application launcher entries.
   remove-launchers
@@ -157,6 +159,32 @@ desktop_app_dir() {
   printf '%s/applications\n' "${XDG_DATA_HOME:-$HOME/.local/share}"
 }
 
+run_privileged() {
+  local command_name="$1"
+  local command_path
+  shift
+
+  command_path="$(command -v "$command_name" 2>/dev/null || true)"
+  [[ -n "$command_path" ]] || die "missing command: $command_name"
+
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$command_path" "$@"
+    return
+  fi
+
+  if [[ -t 0 && -t 1 ]]; then
+    sudo "$command_path" "$@"
+    return
+  fi
+
+  if command -v pkexec >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    pkexec "$command_path" "$@"
+    return
+  fi
+
+  sudo "$command_path" "$@"
+}
+
 warn_if_not_ubuntu_2404() {
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -198,6 +226,7 @@ install_packages() {
     v4l-utils
     desktop-file-utils
     libnotify-bin
+    policykit-1
   )
 
   if [[ ! -e "/lib/modules/$(uname -r)/build" ]]; then
@@ -233,11 +262,32 @@ install_loopback_config() {
   write_root_file "/etc/modules-load.d/canon-webcam.conf" "v4l2loopback"
   write_root_file \
     "/etc/modprobe.d/canon-webcam.conf" \
-    "options v4l2loopback video_nr=${VIDEO_NR} card_label=${CARD_LABEL} exclusive_caps=1"
+    "options v4l2loopback devices=1 video_nr=${VIDEO_NR} card_label=${CARD_LABEL} exclusive_caps=1"
 }
 
 loopback_loaded() {
   lsmod | awk '$1 == "v4l2loopback" { found = 1 } END { exit !found }'
+}
+
+loopback_info() {
+  v4l2-ctl --device "$DEVICE" --info 2>/dev/null || true
+}
+
+loopback_writer_ready() {
+  [[ -c "$DEVICE" ]] || return 1
+  command -v v4l2-ctl >/dev/null 2>&1 || return 0
+  loopback_info | grep -q 'Video Output'
+}
+
+wait_for_video_device() {
+  local attempt
+
+  for attempt in {1..20}; do
+    [[ -c "$DEVICE" ]] && return 0
+    sleep 0.1
+  done
+
+  return 1
 }
 
 load_loopback_now() {
@@ -251,7 +301,8 @@ load_loopback_now() {
   fi
 
   log "Loading v4l2loopback as $DEVICE"
-  if sudo modprobe v4l2loopback "video_nr=${VIDEO_NR}" "card_label=${CARD_LABEL}" exclusive_caps=1; then
+  if run_privileged modprobe v4l2loopback devices=1 "video_nr=${VIDEO_NR}" "card_label=${CARD_LABEL}" exclusive_caps=1; then
+    wait_for_video_device || die "v4l2loopback loaded, but $DEVICE was not created"
     return
   fi
 
@@ -260,6 +311,68 @@ load_loopback_now() {
   fi
 
   die "could not load v4l2loopback"
+}
+
+reset_loopback() {
+  local was_active=0
+
+  need_cmd sudo
+
+  if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+    was_active=1
+    log "Stopping $SERVICE_NAME before resetting v4l2loopback"
+    systemctl_user stop "$SERVICE_NAME"
+  fi
+
+  if [[ -c "$DEVICE" ]] && command -v fuser >/dev/null 2>&1 && fuser "$DEVICE" >/dev/null 2>&1; then
+    warn "$DEVICE is in use. Close Zoom, OBS, browsers, and video settings windows, then run this again."
+    fuser -v "$DEVICE" || true
+    return 1
+  fi
+
+  if loopback_loaded; then
+    log "Unloading v4l2loopback"
+    if ! run_privileged modprobe -r v4l2loopback; then
+      die "could not unload v4l2loopback. Close apps using virtual cameras, then rerun: canon-webcam reset-loopback"
+    fi
+  fi
+
+  log "Loading v4l2loopback as writable $DEVICE"
+  run_privileged modprobe v4l2loopback devices=1 "video_nr=${VIDEO_NR}" "card_label=${CARD_LABEL}" exclusive_caps=1
+
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm settle || true
+  fi
+
+  wait_for_video_device || die "v4l2loopback loaded, but $DEVICE was not created"
+
+  if ! loopback_writer_ready; then
+    warn "$(loopback_info)"
+    die "$DEVICE is present but is not advertising Video Output. Reboot, then run: canon-webcam start"
+  fi
+
+  log "$DEVICE is ready for ffmpeg input"
+
+  if [[ "$was_active" -eq 1 ]]; then
+    log "Restarting $SERVICE_NAME"
+    systemctl_user start "$SERVICE_NAME"
+  fi
+}
+
+ensure_loopback_for_writer() {
+  if [[ ! -c "$DEVICE" ]]; then
+    if loopback_loaded; then
+      warn "$DEVICE is missing while v4l2loopback is loaded; resetting loopback"
+      reset_loopback
+    else
+      load_loopback_now
+    fi
+  fi
+
+  if ! loopback_writer_ready; then
+    warn "$DEVICE is not in writable Video Output mode; resetting loopback"
+    reset_loopback
+  fi
 }
 
 ensure_video_group() {
@@ -417,7 +530,7 @@ install_all() {
 
   if [[ "$START_SERVICE" -eq 1 ]]; then
     log "Starting $SERVICE_NAME"
-    systemctl_user start "$SERVICE_NAME"
+    service_start
   fi
 
   log "Install complete. Connect the camera by USB, set it to movie/live-view capable mode, then run: canon-webcam doctor"
@@ -436,6 +549,8 @@ camera_detected() {
 }
 
 stream_camera() {
+  local fifo gphoto_pid ffmpeg_pid status
+
   need_cmd gphoto2
   need_cmd ffmpeg
 
@@ -454,25 +569,52 @@ stream_camera() {
   log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
   log "Select '${CARD_LABEL}' or '$DEVICE' in your video app. Press Ctrl+C to stop foreground streaming."
 
-  gphoto2 --stdout --capture-movie |
-    ffmpeg \
-      -hide_banner \
-      -loglevel warning \
-      -nostdin \
-      -fflags nobuffer \
-      -flags low_delay \
-      -f mjpeg \
-      -framerate "$FPS" \
-      -i - \
-      -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
-      -r "$FPS" \
-      -vcodec rawvideo \
-      -pix_fmt yuv420p \
-      -f v4l2 \
-      "$DEVICE"
+  fifo="$(mktemp -u)"
+  mkfifo "$fifo"
+
+  cleanup_stream() {
+    kill "${gphoto_pid:-}" "${ffmpeg_pid:-}" >/dev/null 2>&1 || true
+    rm -f "$fifo"
+  }
+  trap cleanup_stream EXIT INT TERM
+
+  gphoto2 --stdout --capture-movie >"$fifo" &
+  gphoto_pid="$!"
+
+  ffmpeg \
+    -hide_banner \
+    -loglevel warning \
+    -nostdin \
+    -fflags nobuffer \
+    -flags low_delay \
+    -f mjpeg \
+    -framerate "$FPS" \
+    -i "$fifo" \
+    -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
+    -r "$FPS" \
+    -vcodec rawvideo \
+    -pix_fmt yuv420p \
+    -f v4l2 \
+    "$DEVICE" &
+  ffmpeg_pid="$!"
+
+  if wait -n "$gphoto_pid" "$ffmpeg_pid"; then
+    status=0
+  else
+    status="$?"
+  fi
+  cleanup_stream
+  trap - EXIT INT TERM
+  return "$status"
 }
 
 service_start() {
+  if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  ensure_loopback_for_writer
+  systemctl_user reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
   systemctl_user start "$SERVICE_NAME"
 }
 
@@ -481,7 +623,8 @@ service_stop() {
 }
 
 service_restart() {
-  systemctl_user restart "$SERVICE_NAME"
+  service_stop >/dev/null 2>&1 || true
+  service_start
 }
 
 service_status() {
@@ -559,6 +702,22 @@ doctor() {
   else
     printf '  missing: %s does not exist\n' "$DEVICE"
     problems=1
+  fi
+
+  if [[ -c "$DEVICE" ]] && command -v v4l2-ctl >/dev/null 2>&1; then
+    if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+      if v4l2-ctl --device "$DEVICE" --get-fmt-video >/dev/null 2>&1; then
+        printf '  ok: %s has an active video format\n' "$DEVICE"
+      else
+        printf '  missing: %s has no active video format; run canon-webcam restart\n' "$DEVICE"
+        problems=1
+      fi
+    elif loopback_writer_ready; then
+      printf '  ok: %s is ready for ffmpeg input\n' "$DEVICE"
+    else
+      printf '  missing: %s is not writable by ffmpeg; run canon-webcam reset-loopback\n' "$DEVICE"
+      problems=1
+    fi
   fi
 
   if command -v v4l2-ctl >/dev/null 2>&1; then
@@ -646,6 +805,9 @@ main() {
       ;;
     doctor)
       doctor
+      ;;
+    reset-loopback)
+      reset_loopback
       ;;
     install-launchers)
       install_desktop_launchers

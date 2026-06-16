@@ -22,8 +22,8 @@ battery. Disable camera Wi-Fi mode while using USB.
 Run the installer as your normal desktop user:
 
 ```bash
-chmod +x ./canon-webcam
-./canon-webcam install
+chmod +x ./canon-webcam.sh
+./canon-webcam.sh install
 ```
 
 Connect and turn on the camera, then check the setup:
@@ -97,7 +97,7 @@ canon-webcam install --enable --start
 Use a different virtual video number:
 
 ```bash
-./canon-webcam install --video-nr 12
+./canon-webcam.sh install --video-nr 12
 ```
 
 Stream at 1080p:
@@ -114,6 +114,18 @@ time. Re-run `canon-webcam install` with new options to update it.
 If `canon-webcam doctor` says `/dev/video42` is missing, reboot once after
 installing. If Secure Boot is enabled, Kubuntu may require enrolling the DKMS
 module signing key before `v4l2loopback` can load.
+
+If Zoom does not show `Canon-Webcam`, close Zoom, then run:
+
+```bash
+canon-webcam reset-loopback
+canon-webcam start
+```
+
+After the start command succeeds, reopen Zoom and check the camera list again.
+The reset command stops the webcam service and reloads `v4l2loopback`; it may
+ask for your password through `sudo` or a graphical Kubuntu authorization
+prompt.
 
 If `gphoto2` does not detect the camera, check that the USB cable carries data,
 the camera is on, Wi-Fi mode is off, and the camera is in PTP/PC Remote mode if
