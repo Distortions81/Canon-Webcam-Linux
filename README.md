@@ -110,26 +110,25 @@ Use a different virtual video number:
 ./canon-webcam.sh install --video-nr 12
 ```
 
-The default stream is tuned for latency at 640x480 with a 10fps camera input
-rate and a 60fps virtual webcam output rate. Many Canon bodies expose live view
-through `gphoto2` at about 10fps; the loopback device repeats the newest frame
-at 60fps so video apps can read from the webcam more frequently.
+The default stream is 1280x720 with a 12fps camera input rate and a 12fps virtual
+webcam output rate. Many Canon bodies expose live view through `gphoto2` at a
+low frame rate, so the default favors a real 720p image without asking ffmpeg to
+invent extra output frames.
 
-Stream at 720p or 1080p if you want a sharper image:
+Stream at another size if you want a different tradeoff:
 
 ```bash
-canon-webcam stream --width 1280 --height 720 --fps 30
-canon-webcam stream --width 1920 --height 1080 --fps 30
+canon-webcam stream --width 640 --height 480
+canon-webcam stream --width 1920 --height 1080
 ```
 
 For the lowest latency, stay on the default or set it explicitly:
 
 ```bash
-canon-webcam stream --width 640 --height 480 --camera-fps 10 --fps 60
+canon-webcam stream --width 1280 --height 720 --camera-fps 12 --fps 12
 ```
 
-If your camera produces frames faster, raise `--camera-fps`. If a video app
-behaves poorly with 60fps virtual input, lower `--fps` to 30.
+If your camera produces frames faster, raise `--camera-fps` and `--fps`.
 
 The loopback device is configured with a short two-frame queue and non-exclusive
 capabilities by default so the webcam remains visible even while the writer is

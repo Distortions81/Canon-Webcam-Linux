@@ -7,10 +7,10 @@ INSTALL_PATH="/usr/local/bin/canon-webcam"
 
 DEFAULT_VIDEO_NR="42"
 DEFAULT_CARD_LABEL="Canon-Webcam"
-DEFAULT_WIDTH="640"
-DEFAULT_HEIGHT="480"
-DEFAULT_FPS="9"
-DEFAULT_CAMERA_FPS="9"
+DEFAULT_WIDTH="1280"
+DEFAULT_HEIGHT="720"
+DEFAULT_FPS="12"
+DEFAULT_CAMERA_FPS="12"
 DEFAULT_LOOPBACK_BUFFERS="2"
 DEFAULT_CAMERA_RETRY_DELAY="3"
 DEFAULT_CAMERA_FAILURE_DELAY="5"
@@ -88,9 +88,9 @@ What it does:
 Defaults:
   Virtual webcam: /dev/video42
   Camera label:   Canon-Webcam
-  Stream size:    640x480
-  Webcam FPS:     60
-  Camera FPS:     10
+  Stream size:    1280x720
+  Webcam FPS:     12
+  Camera FPS:     12
   Loopback queue: 2 buffers
 
 Run install as your regular desktop user. The script will ask for sudo only for
