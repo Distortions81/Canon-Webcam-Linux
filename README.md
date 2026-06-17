@@ -110,8 +110,12 @@ Use a different virtual video number:
 ./canon-webcam.sh install --video-nr 12
 ```
 
-The default stream is tuned for latency at 640x480/30fps. Stream at 720p or
-1080p if you want a sharper image:
+The default stream is tuned for latency at 640x480 with a 10fps camera input
+rate and a 60fps virtual webcam output rate. Many Canon bodies expose live view
+through `gphoto2` at about 10fps; the loopback device repeats the newest frame
+at 60fps so video apps can read from the webcam more frequently.
+
+Stream at 720p or 1080p if you want a sharper image:
 
 ```bash
 canon-webcam stream --width 1280 --height 720 --fps 30
@@ -121,8 +125,11 @@ canon-webcam stream --width 1920 --height 1080 --fps 30
 For the lowest latency, stay on the default or set it explicitly:
 
 ```bash
-canon-webcam stream --width 640 --height 480 --fps 30
+canon-webcam stream --width 640 --height 480 --camera-fps 10 --fps 60
 ```
+
+If your camera produces frames faster, raise `--camera-fps`. If a video app
+behaves poorly with 60fps virtual input, lower `--fps` to 30.
 
 The loopback device is configured with a short two-frame queue and non-exclusive
 capabilities by default so the webcam remains visible even while the writer is
@@ -133,9 +140,9 @@ reload it:
 canon-webcam reset-loopback
 ```
 
-The service stores the width, height, FPS, loopback buffer count, and video
-device chosen at install time. Re-run `canon-webcam install` with new options to
-update it.
+The service stores the width, height, camera FPS, virtual webcam FPS, loopback
+buffer count, and video device chosen at install time. Re-run
+`canon-webcam install` with new options to update it.
 
 ## Troubleshooting
 
@@ -146,8 +153,7 @@ module signing key before `v4l2loopback` can load.
 If Zoom does not show `Canon-Webcam`, close Zoom, then run:
 
 ```bash
-canon-webcam reset-loopback
-canon-webcam start
+canon-webcam hard-reset
 ```
 
 Reopen Zoom and check the camera list while the service is running. If the Canon
@@ -192,6 +198,13 @@ Stop the test with `Ctrl+C`.
 The reset command stops the webcam service and reloads `v4l2loopback`; it may
 ask for your password through `sudo` or a graphical Kubuntu authorization
 prompt.
+
+Use `canon-webcam restart` for a normal service restart. Use
+`canon-webcam hard-reset` when the whole webcam stack seems wedged: it stops the
+service, clears stale `gphoto2`/`ffmpeg` capture processes started by this app,
+reloads `v4l2loopback`, and starts the service again. Close Zoom, OBS, browsers,
+and video settings windows first; Linux cannot unload `v4l2loopback` while a
+video app is holding `/dev/video42` open.
 
 If `canon-webcam doctor` says the camera is detected but not responding to PTP
 commands, turn the camera off, unplug USB, wait a few seconds, turn the camera

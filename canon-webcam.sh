@@ -9,7 +9,8 @@ DEFAULT_VIDEO_NR="42"
 DEFAULT_CARD_LABEL="Canon-Webcam"
 DEFAULT_WIDTH="640"
 DEFAULT_HEIGHT="480"
-DEFAULT_FPS="30"
+DEFAULT_FPS="9"
+DEFAULT_CAMERA_FPS="9"
 DEFAULT_LOOPBACK_BUFFERS="2"
 DEFAULT_CAMERA_RETRY_DELAY="3"
 DEFAULT_CAMERA_FAILURE_DELAY="5"
@@ -24,6 +25,7 @@ CARD_LABEL="${CANON_WEBCAM_LABEL:-$DEFAULT_CARD_LABEL}"
 WIDTH="${CANON_WEBCAM_WIDTH:-$DEFAULT_WIDTH}"
 HEIGHT="${CANON_WEBCAM_HEIGHT:-$DEFAULT_HEIGHT}"
 FPS="${CANON_WEBCAM_FPS:-$DEFAULT_FPS}"
+CAMERA_FPS="${CANON_WEBCAM_CAMERA_FPS:-$DEFAULT_CAMERA_FPS}"
 LOOPBACK_BUFFERS="${CANON_WEBCAM_LOOPBACK_BUFFERS:-$DEFAULT_LOOPBACK_BUFFERS}"
 CAMERA_RETRY_DELAY="${CANON_WEBCAM_CAMERA_RETRY_DELAY:-$DEFAULT_CAMERA_RETRY_DELAY}"
 CAMERA_FAILURE_DELAY="${CANON_WEBCAM_CAMERA_FAILURE_DELAY:-$DEFAULT_CAMERA_FAILURE_DELAY}"
@@ -58,9 +60,9 @@ die() {
 usage() {
   cat <<'USAGE'
 Usage:
-  canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder] [--enable] [--start]
-  canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder]
-  canon-webcam start|stop|restart|status|logs|doctor|reset-loopback|test-source|install-launchers|remove-launchers|uninstall
+  canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--camera-fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder] [--enable] [--start]
+  canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N] [--camera-fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder]
+  canon-webcam start|stop|restart|hard-reset|status|logs|doctor|reset-loopback|test-source|install-launchers|remove-launchers|uninstall
 
 What it does:
   install   Install packages, configure v4l2loopback, install a user service.
@@ -68,6 +70,8 @@ What it does:
   start     Start the systemd user service.
   stop      Stop the systemd user service.
   restart   Restart the systemd user service.
+  hard-reset
+            Stop service, clear this app's capture processes, reload loopback, and start service.
   status    Show the systemd user service status.
   logs      Follow service logs.
   doctor    Check dependencies, loopback device, service, and camera detection.
@@ -85,7 +89,8 @@ Defaults:
   Virtual webcam: /dev/video42
   Camera label:   Canon-Webcam
   Stream size:    640x480
-  Stream FPS:     30
+  Webcam FPS:     60
+  Camera FPS:     10
   Loopback queue: 2 buffers
 
 Run install as your regular desktop user. The script will ask for sudo only for
@@ -127,6 +132,11 @@ parse_args() {
         FPS="$2"
         shift 2
         ;;
+      --camera-fps)
+        [[ $# -ge 2 ]] || die "--camera-fps requires a value"
+        CAMERA_FPS="$2"
+        shift 2
+        ;;
       --loopback-buffers)
         [[ $# -ge 2 ]] || die "--loopback-buffers requires a value"
         LOOPBACK_BUFFERS="$2"
@@ -162,7 +172,10 @@ parse_args() {
   [[ "$WIDTH" =~ ^[0-9]+$ ]] || die "--width must be a number"
   [[ "$HEIGHT" =~ ^[0-9]+$ ]] || die "--height must be a number"
   [[ "$FPS" =~ ^[0-9]+$ ]] || die "--fps must be a number"
+  [[ "$CAMERA_FPS" =~ ^[0-9]+$ ]] || die "--camera-fps must be a number"
   [[ "$LOOPBACK_BUFFERS" =~ ^[0-9]+$ ]] || die "--loopback-buffers must be a number"
+  (( FPS >= 1 )) || die "--fps must be at least 1"
+  (( CAMERA_FPS >= 1 )) || die "--camera-fps must be at least 1"
   (( LOOPBACK_BUFFERS >= 2 )) || die "--loopback-buffers must be at least 2"
   [[ "$CAMERA_RETRY_DELAY" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_RETRY_DELAY must be a number"
   [[ "$CAMERA_FAILURE_DELAY" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_FAILURE_DELAY must be a number"
@@ -339,6 +352,13 @@ loopback_writer_ready() {
   loopback_info | grep -q 'Video Output'
 }
 
+configure_loopback_runtime_controls() {
+  [[ -c "$DEVICE" ]] || return
+  command -v v4l2-ctl >/dev/null 2>&1 || return
+
+  v4l2-ctl --device "$DEVICE" --set-ctrl sustain_framerate=1 >/dev/null 2>&1 || true
+}
+
 wait_for_video_device() {
   local attempt
 
@@ -441,6 +461,8 @@ ensure_loopback_for_writer() {
     warn "$DEVICE is not in writable Video Output mode; resetting loopback"
     reset_loopback
   fi
+
+  configure_loopback_runtime_controls
 }
 
 ensure_video_group() {
@@ -485,8 +507,9 @@ Environment=CANON_WEBCAM_CAMERA_MAX_FAILURE_DELAY=${CAMERA_MAX_FAILURE_DELAY}
 Environment=CANON_WEBCAM_CAMERA_SETTLE_DELAY=${CAMERA_SETTLE_DELAY}
 Environment=CANON_WEBCAM_CAMERA_STABLE_CHECKS=${CAMERA_STABLE_CHECKS}
 Environment=CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=${CAMERA_SEGMENT_SECONDS}
+Environment=CANON_WEBCAM_CAMERA_FPS=${CAMERA_FPS}
 Environment=CANON_WEBCAM_SET_VIEWFINDER=${SET_VIEWFINDER}
-ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS} --loopback-buffers ${LOOPBACK_BUFFERS}${viewfinder_arg}
+ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS} --camera-fps ${CAMERA_FPS} --loopback-buffers ${LOOPBACK_BUFFERS}${viewfinder_arg}
 Restart=always
 RestartSec=3
 
@@ -733,10 +756,31 @@ stop_orphaned_test_source_feeders() {
   local pattern
 
   command -v pkill >/dev/null 2>&1 || return
-  pattern="ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}.* -f image2pipe /tmp/tmp"
+  pattern="ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${CAMERA_FPS}.* -f image2pipe /tmp/tmp"
   pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
   sleep 0.5
   pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+}
+
+stop_orphaned_stream_processes() {
+  local pattern
+  local patterns=(
+    "gphoto2 --stdout --capture-movie"
+    "ffmpeg .* -f v4l2 ${DEVICE}"
+    "ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=.* -f image2pipe /tmp/tmp"
+  )
+
+  command -v pkill >/dev/null 2>&1 || return
+
+  for pattern in "${patterns[@]}"; do
+    pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
+  done
+
+  sleep 0.5
+
+  for pattern in "${patterns[@]}"; do
+    pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+  done
 }
 
 run_test_source_ffmpeg() {
@@ -759,7 +803,7 @@ run_test_source_feeder_ffmpeg() {
     -nostdin \
     -re \
     -f lavfi \
-    -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
+    -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${CAMERA_FPS}" \
     -vf format=yuvj420p \
     -vcodec mjpeg \
     -q:v 5 \
@@ -779,16 +823,25 @@ start_loopback_writer() {
 
   exec {CAMERA_FIFO_HOLD_FD}<>"$CAMERA_FIFO"
 
-  log "Starting persistent ffmpeg writer for $DEVICE"
+  log "Starting persistent ffmpeg writer for $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps output"
   ffmpeg \
     -hide_banner \
     -loglevel error \
     -nostdin \
+    -fflags nobuffer \
+    -flags low_delay \
+    -avioflags direct \
+    -probesize 32 \
+    -analyzeduration 0 \
+    -fpsprobesize 0 \
     -f image2pipe \
     -vcodec mjpeg \
-    -framerate "$FPS" \
+    -framerate "$CAMERA_FPS" \
+    -thread_queue_size 1 \
     -i "$CAMERA_FIFO" \
+    -filter_threads 1 \
     -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
+    -r "$FPS" \
     -vcodec rawvideo \
     -pix_fmt yuv420p \
     -f v4l2 \
@@ -824,7 +877,7 @@ stop_background_test_source() {
   stop_orphaned_test_source_feeders
 
   if [[ -n "${CAMERA_FIFO:-}" ]] && command -v pkill >/dev/null 2>&1; then
-    pkill -TERM -f "ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}.* ${CAMERA_FIFO}" >/dev/null 2>&1 || true
+    pkill -TERM -f "ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${CAMERA_FPS}.* ${CAMERA_FIFO}" >/dev/null 2>&1 || true
   fi
 }
 
@@ -923,7 +976,7 @@ stream_camera() {
     stop_background_test_source
 
     if (( CAMERA_SEGMENT_SECONDS == 0 )); then
-      log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
+      log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${CAMERA_FPS}fps camera input, ${FPS}fps webcam output"
       started_at="$(date +%s)"
 
       if run_camera_stream_once; then
@@ -940,7 +993,7 @@ stream_camera() {
       fi
 
       while true; do
-        log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
+        log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${CAMERA_FPS}fps camera input, ${FPS}fps webcam output"
         started_at="$(date +%s)"
 
         if run_camera_stream_once; then
@@ -1001,6 +1054,20 @@ service_stop() {
 
 service_restart() {
   service_stop >/dev/null 2>&1 || true
+  service_start
+}
+
+service_hard_reset() {
+  log "Stopping $SERVICE_NAME"
+  service_stop >/dev/null 2>&1 || true
+
+  log "Clearing stale Canon webcam capture processes"
+  stop_orphaned_stream_processes
+
+  log "Reloading v4l2loopback for $DEVICE"
+  reset_loopback
+
+  log "Starting $SERVICE_NAME"
   service_start
 }
 
@@ -1198,6 +1265,9 @@ main() {
       ;;
     restart)
       service_restart
+      ;;
+    hard-reset)
+      service_hard_reset
       ;;
     status)
       service_status
