@@ -7,19 +7,40 @@ INSTALL_PATH="/usr/local/bin/canon-webcam"
 
 DEFAULT_VIDEO_NR="42"
 DEFAULT_CARD_LABEL="Canon-Webcam"
-DEFAULT_WIDTH="1280"
-DEFAULT_HEIGHT="720"
+DEFAULT_WIDTH="640"
+DEFAULT_HEIGHT="480"
 DEFAULT_FPS="30"
+DEFAULT_LOOPBACK_BUFFERS="2"
+DEFAULT_CAMERA_RETRY_DELAY="3"
+DEFAULT_CAMERA_FAILURE_DELAY="5"
+DEFAULT_CAMERA_MAX_FAILURE_DELAY="5"
+DEFAULT_CAMERA_SETTLE_DELAY="5"
+DEFAULT_CAMERA_STABLE_CHECKS="2"
+DEFAULT_CAMERA_SEGMENT_SECONDS="0"
+DEFAULT_SET_VIEWFINDER="1"
 
 VIDEO_NR="${CANON_WEBCAM_VIDEO_NR:-$DEFAULT_VIDEO_NR}"
 CARD_LABEL="${CANON_WEBCAM_LABEL:-$DEFAULT_CARD_LABEL}"
 WIDTH="${CANON_WEBCAM_WIDTH:-$DEFAULT_WIDTH}"
 HEIGHT="${CANON_WEBCAM_HEIGHT:-$DEFAULT_HEIGHT}"
 FPS="${CANON_WEBCAM_FPS:-$DEFAULT_FPS}"
+LOOPBACK_BUFFERS="${CANON_WEBCAM_LOOPBACK_BUFFERS:-$DEFAULT_LOOPBACK_BUFFERS}"
+CAMERA_RETRY_DELAY="${CANON_WEBCAM_CAMERA_RETRY_DELAY:-$DEFAULT_CAMERA_RETRY_DELAY}"
+CAMERA_FAILURE_DELAY="${CANON_WEBCAM_CAMERA_FAILURE_DELAY:-$DEFAULT_CAMERA_FAILURE_DELAY}"
+CAMERA_MAX_FAILURE_DELAY="${CANON_WEBCAM_CAMERA_MAX_FAILURE_DELAY:-$DEFAULT_CAMERA_MAX_FAILURE_DELAY}"
+CAMERA_SETTLE_DELAY="${CANON_WEBCAM_CAMERA_SETTLE_DELAY:-$DEFAULT_CAMERA_SETTLE_DELAY}"
+CAMERA_STABLE_CHECKS="${CANON_WEBCAM_CAMERA_STABLE_CHECKS:-$DEFAULT_CAMERA_STABLE_CHECKS}"
+CAMERA_SEGMENT_SECONDS="${CANON_WEBCAM_CAMERA_SEGMENT_SECONDS:-$DEFAULT_CAMERA_SEGMENT_SECONDS}"
+SET_VIEWFINDER="${CANON_WEBCAM_SET_VIEWFINDER:-$DEFAULT_SET_VIEWFINDER}"
 DEVICE="${CANON_WEBCAM_DEVICE:-}"
 DEVICE_EXPLICIT=0
 ENABLE_SERVICE=0
 START_SERVICE=0
+TEST_SOURCE_PID=""
+CAMERA_GPHOTO_PID=""
+LOOPBACK_WRITER_PID=""
+CAMERA_FIFO=""
+CAMERA_FIFO_HOLD_FD=""
 
 log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -37,8 +58,8 @@ die() {
 usage() {
   cat <<'USAGE'
 Usage:
-  canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--enable] [--start]
-  canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N]
+  canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder] [--enable] [--start]
+  canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder]
   canon-webcam start|stop|restart|status|logs|doctor|reset-loopback|test-source|install-launchers|remove-launchers|uninstall
 
 What it does:
@@ -63,8 +84,9 @@ What it does:
 Defaults:
   Virtual webcam: /dev/video42
   Camera label:   Canon-Webcam
-  Stream size:    1280x720
+  Stream size:    640x480
   Stream FPS:     30
+  Loopback queue: 2 buffers
 
 Run install as your regular desktop user. The script will ask for sudo only for
 system package and kernel module setup.
@@ -105,6 +127,19 @@ parse_args() {
         FPS="$2"
         shift 2
         ;;
+      --loopback-buffers)
+        [[ $# -ge 2 ]] || die "--loopback-buffers requires a value"
+        LOOPBACK_BUFFERS="$2"
+        shift 2
+        ;;
+      --set-viewfinder)
+        SET_VIEWFINDER=1
+        shift
+        ;;
+      --no-set-viewfinder)
+        SET_VIEWFINDER=0
+        shift
+        ;;
       --enable)
         ENABLE_SERVICE=1
         shift
@@ -127,6 +162,20 @@ parse_args() {
   [[ "$WIDTH" =~ ^[0-9]+$ ]] || die "--width must be a number"
   [[ "$HEIGHT" =~ ^[0-9]+$ ]] || die "--height must be a number"
   [[ "$FPS" =~ ^[0-9]+$ ]] || die "--fps must be a number"
+  [[ "$LOOPBACK_BUFFERS" =~ ^[0-9]+$ ]] || die "--loopback-buffers must be a number"
+  (( LOOPBACK_BUFFERS >= 2 )) || die "--loopback-buffers must be at least 2"
+  [[ "$CAMERA_RETRY_DELAY" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_RETRY_DELAY must be a number"
+  [[ "$CAMERA_FAILURE_DELAY" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_FAILURE_DELAY must be a number"
+  [[ "$CAMERA_MAX_FAILURE_DELAY" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_MAX_FAILURE_DELAY must be a number"
+  [[ "$CAMERA_SETTLE_DELAY" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_SETTLE_DELAY must be a number"
+  [[ "$CAMERA_STABLE_CHECKS" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_STABLE_CHECKS must be a number"
+  [[ "$CAMERA_SEGMENT_SECONDS" =~ ^[0-9]+$ ]] || die "CANON_WEBCAM_CAMERA_SEGMENT_SECONDS must be a number"
+  [[ "$SET_VIEWFINDER" =~ ^(0|1)$ ]] || die "CANON_WEBCAM_SET_VIEWFINDER must be 0 or 1"
+  (( CAMERA_RETRY_DELAY >= 1 )) || die "CANON_WEBCAM_CAMERA_RETRY_DELAY must be at least 1"
+  (( CAMERA_FAILURE_DELAY >= 1 )) || die "CANON_WEBCAM_CAMERA_FAILURE_DELAY must be at least 1"
+  (( CAMERA_MAX_FAILURE_DELAY >= CAMERA_FAILURE_DELAY )) || die "CANON_WEBCAM_CAMERA_MAX_FAILURE_DELAY must be greater than or equal to CANON_WEBCAM_CAMERA_FAILURE_DELAY"
+  (( CAMERA_STABLE_CHECKS >= 1 )) || die "CANON_WEBCAM_CAMERA_STABLE_CHECKS must be at least 1"
+  (( CAMERA_SEGMENT_SECONDS >= 0 )) || die "CANON_WEBCAM_CAMERA_SEGMENT_SECONDS must be at least 0"
   [[ "$CARD_LABEL" =~ ^[A-Za-z0-9._-]+$ ]] || die "--label may only contain letters, numbers, dots, underscores, and dashes"
 
   DEVICE="${DEVICE:-/dev/video${VIDEO_NR}}"
@@ -264,7 +313,16 @@ install_loopback_config() {
   write_root_file "/etc/modules-load.d/canon-webcam.conf" "v4l2loopback"
   write_root_file \
     "/etc/modprobe.d/canon-webcam.conf" \
-    "options v4l2loopback devices=1 video_nr=${VIDEO_NR} card_label=${CARD_LABEL} exclusive_caps=1"
+    "options v4l2loopback devices=1 video_nr=${VIDEO_NR} card_label=${CARD_LABEL} exclusive_caps=0 max_buffers=${LOOPBACK_BUFFERS}"
+}
+
+loopback_modprobe_args() {
+  printf '%s\n' \
+    "devices=1" \
+    "video_nr=${VIDEO_NR}" \
+    "card_label=${CARD_LABEL}" \
+    "exclusive_caps=0" \
+    "max_buffers=${LOOPBACK_BUFFERS}"
 }
 
 loopback_loaded() {
@@ -293,6 +351,8 @@ wait_for_video_device() {
 }
 
 load_loopback_now() {
+  local modprobe_args
+
   if [[ -c "$DEVICE" ]]; then
     log "Virtual webcam already exists at $DEVICE"
     return
@@ -303,7 +363,8 @@ load_loopback_now() {
   fi
 
   log "Loading v4l2loopback as $DEVICE"
-  if run_privileged modprobe v4l2loopback devices=1 "video_nr=${VIDEO_NR}" "card_label=${CARD_LABEL}" exclusive_caps=1; then
+  mapfile -t modprobe_args < <(loopback_modprobe_args)
+  if run_privileged modprobe v4l2loopback "${modprobe_args[@]}"; then
     wait_for_video_device || die "v4l2loopback loaded, but $DEVICE was not created"
     return
   fi
@@ -316,7 +377,7 @@ load_loopback_now() {
 }
 
 reset_loopback() {
-  local was_active=0
+  local modprobe_args was_active=0
 
   need_cmd sudo
 
@@ -344,7 +405,8 @@ reset_loopback() {
   fi
 
   log "Loading v4l2loopback as writable $DEVICE"
-  run_privileged modprobe v4l2loopback devices=1 "video_nr=${VIDEO_NR}" "card_label=${CARD_LABEL}" exclusive_caps=1
+  mapfile -t modprobe_args < <(loopback_modprobe_args)
+  run_privileged modprobe v4l2loopback "${modprobe_args[@]}"
 
   if command -v udevadm >/dev/null 2>&1; then
     udevadm settle || true
@@ -389,25 +451,44 @@ ensure_video_group() {
   fi
 }
 
+enable_user_linger() {
+  if command -v loginctl >/dev/null 2>&1; then
+    log "Enabling lingering so $SERVICE_NAME can keep the virtual webcam populated after boot"
+    if ! loginctl enable-linger "$USER" >/dev/null 2>&1; then
+      run_privileged loginctl enable-linger "$USER" || warn "could not enable lingering; $SERVICE_NAME will start after login instead of boot"
+    fi
+  fi
+}
+
 install_user_service() {
-  local service_dir service_file tmp
+  local service_dir service_file tmp viewfinder_arg
 
   service_dir="$HOME/.config/systemd/user"
   service_file="$service_dir/$SERVICE_NAME"
+  viewfinder_arg=""
+  if [[ "$SET_VIEWFINDER" -eq 1 ]]; then
+    viewfinder_arg=" --set-viewfinder"
+  fi
   mkdir -p "$service_dir"
 
   tmp="$(mktemp)"
   cat >"$tmp" <<SERVICE
 [Unit]
 Description=Canon camera virtual webcam
-After=graphical-session.target
-PartOf=graphical-session.target
 
 [Service]
 Type=simple
 Environment=CANON_WEBCAM_IN_SERVICE=1
-ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS}
-Restart=no
+Environment=CANON_WEBCAM_CAMERA_RETRY_DELAY=${CAMERA_RETRY_DELAY}
+Environment=CANON_WEBCAM_CAMERA_FAILURE_DELAY=${CAMERA_FAILURE_DELAY}
+Environment=CANON_WEBCAM_CAMERA_MAX_FAILURE_DELAY=${CAMERA_MAX_FAILURE_DELAY}
+Environment=CANON_WEBCAM_CAMERA_SETTLE_DELAY=${CAMERA_SETTLE_DELAY}
+Environment=CANON_WEBCAM_CAMERA_STABLE_CHECKS=${CAMERA_STABLE_CHECKS}
+Environment=CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=${CAMERA_SEGMENT_SECONDS}
+Environment=CANON_WEBCAM_SET_VIEWFINDER=${SET_VIEWFINDER}
+ExecStart=${INSTALL_PATH} stream --device ${DEVICE} --label ${CARD_LABEL} --width ${WIDTH} --height ${HEIGHT} --fps ${FPS} --loopback-buffers ${LOOPBACK_BUFFERS}${viewfinder_arg}
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=default.target
@@ -545,13 +626,12 @@ install_all() {
   install_loopback_config
   load_loopback_now
   ensure_video_group
+  enable_user_linger
   install_user_service
   install_desktop_launchers
 
-  if [[ "$ENABLE_SERVICE" -eq 1 ]]; then
-    log "Enabling $SERVICE_NAME"
-    systemctl_user enable "$SERVICE_NAME"
-  fi
+  log "Enabling $SERVICE_NAME"
+  systemctl_user enable "$SERVICE_NAME"
 
   if [[ "$START_SERVICE" -eq 1 ]]; then
     log "Starting $SERVICE_NAME"
@@ -563,14 +643,64 @@ install_all() {
 }
 
 stop_camera_mount_helpers() {
-  if pgrep -u "$USER" -x gvfsd-gphoto2 >/dev/null 2>&1; then
-    log "Stopping gvfsd-gphoto2 so gphoto2 can claim the camera"
-    pkill -u "$USER" -x gvfsd-gphoto2 || true
-  fi
+  local name name_pattern pattern
+  local names=(
+    gvfsd-gphoto2
+    gvfs-gphoto2-volume-monitor
+    PTPCamera
+  )
+  local patterns=(
+    'kioworker.*(camera|gphoto|mtp|ptp)'
+    'kio_.*(camera|gphoto|mtp|ptp)'
+  )
+
+  for name in "${names[@]}"; do
+    name_pattern="(^|/)${name}([[:space:]]|$)"
+    if pgrep -u "$USER" -f "$name_pattern" >/dev/null 2>&1; then
+      log "Stopping $name so gphoto2 can claim the camera"
+      pkill -u "$USER" -f "$name_pattern" || true
+    fi
+  done
+
+  for pattern in "${patterns[@]}"; do
+    if pgrep -u "$USER" -f "$pattern" >/dev/null 2>&1; then
+      log "Stopping KDE camera worker matching: $pattern"
+      pkill -u "$USER" -f "$pattern" || true
+    fi
+  done
 }
 
 camera_detected() {
   gphoto2 --auto-detect | awk 'NR > 2 && NF { found = 1 } END { exit !found }'
+}
+
+camera_detect_line() {
+  gphoto2 --auto-detect | awk 'NR > 2 && NF { print; exit }'
+}
+
+camera_wait_stable() {
+  local attempt current previous=""
+
+  for (( attempt = 1; attempt <= CAMERA_STABLE_CHECKS; attempt++ )); do
+    current="$(camera_detect_line)"
+    if [[ -z "$current" ]]; then
+      return 1
+    fi
+
+    if [[ -n "$previous" && "$current" != "$previous" ]]; then
+      return 1
+    fi
+
+    previous="$current"
+    if (( attempt < CAMERA_STABLE_CHECKS )); then
+      sleep 1
+    fi
+  done
+
+  if (( CAMERA_SETTLE_DELAY > 0 )); then
+    log "Camera detected; waiting ${CAMERA_SETTLE_DELAY}s for USB/PTP to settle"
+    sleep "$CAMERA_SETTLE_DELAY"
+  fi
 }
 
 camera_set_config() {
@@ -579,13 +709,37 @@ camera_set_config() {
   timeout 5 gphoto2 --set-config "$config" >/dev/null 2>&1 || true
 }
 
-stream_test_source() {
-  need_cmd ffmpeg
+camera_prepare_live_view() {
+  if [[ "$SET_VIEWFINDER" -ne 1 ]]; then
+    return
+  fi
 
-  ensure_loopback_for_writer
-  log "Streaming generated test pattern to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
-  log "Open Zoom and select '${CARD_LABEL}' or '$DEVICE'. Press Ctrl+C to stop."
+  log "Preparing Canon EOS live view"
+  camera_set_config capturetarget=0
+  camera_set_config eosviewfinder=1
+}
 
+terminate_process() {
+  local pid="$1"
+
+  [[ -n "$pid" ]] || return
+  kill "$pid" >/dev/null 2>&1 || true
+  sleep 0.5
+  kill -KILL "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+stop_orphaned_test_source_feeders() {
+  local pattern
+
+  command -v pkill >/dev/null 2>&1 || return
+  pattern="ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}.* -f image2pipe /tmp/tmp"
+  pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
+  sleep 0.5
+  pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+}
+
+run_test_source_ffmpeg() {
   ffmpeg \
     -hide_banner \
     -loglevel warning \
@@ -597,8 +751,148 @@ stream_test_source() {
     "$DEVICE"
 }
 
+run_test_source_feeder_ffmpeg() {
+  ffmpeg \
+    -hide_banner \
+    -y \
+    -loglevel error \
+    -nostdin \
+    -re \
+    -f lavfi \
+    -i "testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}" \
+    -vf format=yuvj420p \
+    -vcodec mjpeg \
+    -q:v 5 \
+    -f image2pipe \
+    "$CAMERA_FIFO"
+}
+
+start_loopback_writer() {
+  if [[ -n "${LOOPBACK_WRITER_PID:-}" ]] && kill -0 "$LOOPBACK_WRITER_PID" >/dev/null 2>&1; then
+    return
+  fi
+
+  stop_orphaned_test_source_feeders
+
+  CAMERA_FIFO="$(mktemp -u)"
+  mkfifo "$CAMERA_FIFO"
+
+  exec {CAMERA_FIFO_HOLD_FD}<>"$CAMERA_FIFO"
+
+  log "Starting persistent ffmpeg writer for $DEVICE"
+  ffmpeg \
+    -hide_banner \
+    -loglevel error \
+    -nostdin \
+    -f image2pipe \
+    -vcodec mjpeg \
+    -framerate "$FPS" \
+    -i "$CAMERA_FIFO" \
+    -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
+    -vcodec rawvideo \
+    -pix_fmt yuv420p \
+    -f v4l2 \
+    "$DEVICE" &
+  LOOPBACK_WRITER_PID="$!"
+
+  sleep 0.5
+  if ! kill -0 "$LOOPBACK_WRITER_PID" >/dev/null 2>&1; then
+    stop_camera_stream_processes
+    die "ffmpeg writer exited before it could write to $DEVICE"
+  fi
+}
+
+start_background_test_source() {
+  start_loopback_writer
+
+  if [[ -n "${TEST_SOURCE_PID:-}" ]] && kill -0 "$TEST_SOURCE_PID" >/dev/null 2>&1; then
+    return
+  fi
+
+  stop_background_test_source
+  log "Keeping $DEVICE visible with a generated test pattern at ${WIDTH}x${HEIGHT}/${FPS}fps"
+  run_test_source_feeder_ffmpeg &
+  TEST_SOURCE_PID="$!"
+}
+
+stop_background_test_source() {
+  if [[ -n "${TEST_SOURCE_PID:-}" ]]; then
+    terminate_process "$TEST_SOURCE_PID"
+    TEST_SOURCE_PID=""
+  fi
+
+  stop_orphaned_test_source_feeders
+
+  if [[ -n "${CAMERA_FIFO:-}" ]] && command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -f "ffmpeg .*testsrc2=size=${WIDTH}x${HEIGHT}:rate=${FPS}.* ${CAMERA_FIFO}" >/dev/null 2>&1 || true
+  fi
+}
+
+stream_test_source() {
+  need_cmd ffmpeg
+
+  ensure_loopback_for_writer
+  log "Streaming generated test pattern to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
+  log "Open Zoom and select '${CARD_LABEL}' or '$DEVICE'. Press Ctrl+C to stop."
+
+  run_test_source_ffmpeg
+}
+
+stop_camera_stream_processes() {
+  stop_background_test_source
+
+  if [[ -n "${CAMERA_GPHOTO_PID:-}" ]]; then
+    terminate_process "$CAMERA_GPHOTO_PID"
+  fi
+
+  if [[ -n "${CAMERA_FIFO_HOLD_FD:-}" ]]; then
+    eval "exec ${CAMERA_FIFO_HOLD_FD}>&-"
+    CAMERA_FIFO_HOLD_FD=""
+  fi
+
+  if [[ -n "${LOOPBACK_WRITER_PID:-}" ]]; then
+    terminate_process "$LOOPBACK_WRITER_PID"
+  fi
+
+  CAMERA_GPHOTO_PID=""
+  LOOPBACK_WRITER_PID=""
+
+  if [[ -n "${CAMERA_FIFO:-}" ]]; then
+    rm -f "$CAMERA_FIFO"
+    CAMERA_FIFO=""
+  fi
+}
+
+run_camera_stream_once() {
+  local status
+
+  start_loopback_writer
+
+  if (( CAMERA_SEGMENT_SECONDS == 0 )); then
+    gphoto2 --stdout --capture-movie >"$CAMERA_FIFO" &
+  else
+    gphoto2 --stdout "--capture-movie=${CAMERA_SEGMENT_SECONDS}s" >"$CAMERA_FIFO" &
+  fi
+  CAMERA_GPHOTO_PID="$!"
+
+  if wait "$CAMERA_GPHOTO_PID"; then
+    status=0
+  else
+    status="$?"
+  fi
+
+  CAMERA_GPHOTO_PID=""
+  return "$status"
+}
+
+cleanup_stream() {
+  trap - EXIT INT TERM
+  stop_camera_stream_processes
+}
+
 stream_camera() {
-  local fifo gphoto_pid ffmpeg_pid status
+  local backoff_delay="$CAMERA_FAILURE_DELAY"
+  local normal_segment_min retry_after started_at status stream_duration
 
   need_cmd gphoto2
   need_cmd ffmpeg
@@ -606,66 +900,87 @@ stream_camera() {
   [[ -c "$DEVICE" ]] || die "$DEVICE does not exist. Run 'canon-webcam install' and reboot if the loopback module was just built."
   ensure_loopback_for_writer
 
-  stop_camera_mount_helpers
-
-  if ! camera_detected; then
-    warn "no gphoto2-compatible camera detected; keeping $DEVICE visible with a generated test pattern"
-    stream_test_source
-    return
-  fi
-
-  # Best effort for EOS bodies. Compact cameras and non-EOS models may not expose these config keys.
-  camera_set_config eosviewfinder=1
-  camera_set_config viewfinder=1
-
-  log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
-  log "Select '${CARD_LABEL}' or '$DEVICE' in your video app. Press Ctrl+C to stop foreground streaming."
-
-  fifo="$(mktemp -u)"
-  mkfifo "$fifo"
-
-  cleanup_stream() {
-    kill "${gphoto_pid:-}" "${ffmpeg_pid:-}" >/dev/null 2>&1 || true
-    rm -f "$fifo"
-  }
   trap cleanup_stream EXIT
   trap 'cleanup_stream; exit 0' INT TERM
 
-  gphoto2 --stdout --capture-movie >"$fifo" &
-  gphoto_pid="$!"
+  log "Select '${CARD_LABEL}' or '$DEVICE' in your video app. Press Ctrl+C to stop foreground streaming."
+  start_background_test_source
 
-  ffmpeg \
-    -hide_banner \
-    -loglevel warning \
-    -nostdin \
-    -fflags nobuffer \
-    -flags low_delay \
-    -f mjpeg \
-    -framerate "$FPS" \
-    -i "$fifo" \
-    -vf "scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=yuv420p" \
-    -r "$FPS" \
-    -vcodec rawvideo \
-    -pix_fmt yuv420p \
-    -f v4l2 \
-    "$DEVICE" &
-  ffmpeg_pid="$!"
+  while true; do
+    stop_camera_mount_helpers
 
-  if wait -n "$gphoto_pid" "$ffmpeg_pid"; then
-    status=0
-  else
-    status="$?"
-  fi
-  cleanup_stream
-  trap - EXIT INT TERM
+    if ! camera_wait_stable; then
+      warn "no stable gphoto2-compatible camera detected; retrying in ${CAMERA_RETRY_DELAY}s"
+      start_background_test_source
+      sleep "$CAMERA_RETRY_DELAY"
+      continue
+    fi
 
-  if [[ "$status" -eq 0 ]]; then
-    warn "Canon stream ended; keeping $DEVICE visible with a generated test pattern"
-  else
-    warn "Canon stream failed with status $status; keeping $DEVICE visible with a generated test pattern"
-  fi
+    stop_camera_mount_helpers
+    camera_prepare_live_view
+    stop_camera_mount_helpers
 
-  stream_test_source
+    stop_background_test_source
+
+    if (( CAMERA_SEGMENT_SECONDS == 0 )); then
+      log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
+      started_at="$(date +%s)"
+
+      if run_camera_stream_once; then
+        status=0
+      else
+        status="$?"
+      fi
+
+      stream_duration=$(( $(date +%s) - started_at ))
+    else
+      normal_segment_min=1
+      if (( CAMERA_SEGMENT_SECONDS > 1 )); then
+        normal_segment_min=$(( CAMERA_SEGMENT_SECONDS - 1 ))
+      fi
+
+      while true; do
+        log "Streaming Canon live view to $DEVICE at ${WIDTH}x${HEIGHT}/${FPS}fps"
+        started_at="$(date +%s)"
+
+        if run_camera_stream_once; then
+          status=0
+        else
+          status="$?"
+        fi
+
+        stream_duration=$(( $(date +%s) - started_at ))
+        if [[ "$status" -eq 0 && "$stream_duration" -ge "$normal_segment_min" ]]; then
+          backoff_delay="$CAMERA_FAILURE_DELAY"
+          log "Canon segment ended after ${stream_duration}s; restarting capture immediately"
+          continue
+        fi
+
+        break
+      done
+    fi
+
+    if (( stream_duration >= 60 )); then
+      backoff_delay="$CAMERA_FAILURE_DELAY"
+    fi
+
+    retry_after="$backoff_delay"
+    if [[ "$status" -eq 0 ]]; then
+      warn "Canon stream ended after ${stream_duration}s; retrying in ${retry_after}s"
+    else
+      warn "Canon stream failed with status $status after ${stream_duration}s; retrying in ${retry_after}s"
+    fi
+
+    if (( stream_duration < 60 )); then
+      backoff_delay=$(( backoff_delay * 2 ))
+      if (( backoff_delay > CAMERA_MAX_FAILURE_DELAY )); then
+        backoff_delay="$CAMERA_MAX_FAILURE_DELAY"
+      fi
+    fi
+
+    start_background_test_source
+    sleep "$retry_after"
+  done
 }
 
 service_start() {
@@ -731,8 +1046,13 @@ launcher_status() {
 doctor() {
   local problems=0
   local service_file="$HOME/.config/systemd/user/$SERVICE_NAME"
+  local service_active=0
   local self
   local v4l_output=""
+
+  if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+    service_active=1
+  fi
 
   printf 'System:\n'
   if [[ -r /etc/os-release ]]; then
@@ -802,18 +1122,23 @@ doctor() {
 
   printf '\nCamera:\n'
   if command -v gphoto2 >/dev/null 2>&1; then
-    gphoto2 --auto-detect || true
-    if camera_detected; then
-      printf '  ok: gphoto2 sees a camera\n'
-      if timeout 8 gphoto2 --summary >/dev/null 2>&1; then
-        printf '  ok: camera responds to PTP commands\n'
+    if [[ "$service_active" -eq 1 ]]; then
+      printf '  skipped: %s is active and may own the camera PTP session\n' "$SERVICE_NAME"
+      printf '  hint: run canon-webcam logs to inspect live capture, or stop the service before direct gphoto2 checks\n'
+    else
+      gphoto2 --auto-detect || true
+      if camera_detected; then
+        printf '  ok: gphoto2 sees a camera\n'
+        if timeout 8 gphoto2 --summary >/dev/null 2>&1; then
+          printf '  ok: camera responds to PTP commands\n'
+        else
+          printf '  missing: camera is detected but not responding to PTP commands; power-cycle it and reconnect USB\n'
+          problems=1
+        fi
       else
-        printf '  missing: camera is detected but not responding to PTP commands; power-cycle it and reconnect USB\n'
+        printf '  missing: gphoto2 does not see a camera\n'
         problems=1
       fi
-    else
-      printf '  missing: gphoto2 does not see a camera\n'
-      problems=1
     fi
   else
     printf '  skipped: gphoto2 is not installed\n'
@@ -822,7 +1147,7 @@ doctor() {
   printf '\nService:\n'
   if [[ -f "$service_file" ]]; then
     systemctl_user is-enabled "$SERVICE_NAME" >/dev/null 2>&1 && printf '  enabled: yes\n' || printf '  enabled: no\n'
-    systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1 && printf '  active: yes\n' || printf '  active: no\n'
+    [[ "$service_active" -eq 1 ]] && printf '  active: yes\n' || printf '  active: no\n'
   else
     printf '  missing: %s is not installed\n' "$SERVICE_NAME"
   fi

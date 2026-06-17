@@ -66,8 +66,10 @@ canon-webcam remove-launchers
 
 ## Systemd User Service
 
-The installer also creates a systemd user service. Start it after connecting the
-camera:
+The installer also creates and enables a systemd user service. The service keeps
+the virtual webcam populated with a generated test pattern whenever Canon live
+view is unavailable, so video apps can keep the same camera device selected.
+Start it immediately after installing:
 
 ```bash
 canon-webcam start
@@ -84,16 +86,20 @@ Stop it when finished:
 canon-webcam stop
 ```
 
-Enable automatic startup for your desktop session:
+The installer enables automatic startup. It also tries to enable systemd user
+lingering so the virtual webcam can be populated after boot, before the desktop
+session starts. If lingering cannot be enabled, the service starts after login.
+
+Refresh the installed service without changing resolution:
 
 ```bash
-canon-webcam install --enable
+canon-webcam install
 ```
 
 Or install and start immediately:
 
 ```bash
-canon-webcam install --enable --start
+canon-webcam install --start
 ```
 
 ## Custom Device or Resolution
@@ -104,14 +110,32 @@ Use a different virtual video number:
 ./canon-webcam.sh install --video-nr 12
 ```
 
-Stream at 1080p:
+The default stream is tuned for latency at 640x480/30fps. Stream at 720p or
+1080p if you want a sharper image:
 
 ```bash
+canon-webcam stream --width 1280 --height 720 --fps 30
 canon-webcam stream --width 1920 --height 1080 --fps 30
 ```
 
-The service stores the width, height, FPS, and video device chosen at install
-time. Re-run `canon-webcam install` with new options to update it.
+For the lowest latency, stay on the default or set it explicitly:
+
+```bash
+canon-webcam stream --width 640 --height 480 --fps 30
+```
+
+The loopback device is configured with a short two-frame queue and non-exclusive
+capabilities by default so the webcam remains visible even while the writer is
+between Canon and fallback streams. If you previously installed an older config,
+reload it:
+
+```bash
+canon-webcam reset-loopback
+```
+
+The service stores the width, height, FPS, loopback buffer count, and video
+device chosen at install time. Re-run `canon-webcam install` with new options to
+update it.
 
 ## Troubleshooting
 
@@ -128,7 +152,34 @@ canon-webcam start
 
 Reopen Zoom and check the camera list while the service is running. If the Canon
 camera is unavailable, the service writes a generated test pattern so the
-virtual webcam is still visible.
+virtual webcam is still visible. The service keeps checking for the camera and
+switches back to the Canon live view after the camera comes back online. If
+Canon live view starts and then fails quickly, the service waits longer between
+retries so the camera's USB/PTP session can settle.
+
+The service keeps one persistent `ffmpeg` writer attached to the loopback
+device. Canon capture and the fallback test pattern both feed that writer, so
+apps such as Zoom do not have to survive the virtual webcam writer being closed
+and reopened.
+
+The stream waits for the same camera to appear across consecutive checks, then
+pauses briefly before starting capture. If your camera is slow to become ready,
+increase the settle delay:
+
+```bash
+CANON_WEBCAM_CAMERA_SETTLE_DELAY=5 canon-webcam install
+canon-webcam restart
+```
+
+Canon capture runs continuously by default. If you need periodic capture
+restarts for troubleshooting a stalled camera session, opt into timed segments:
+
+```bash
+CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=30 canon-webcam install
+canon-webcam restart
+```
+
+Set `CANON_WEBCAM_CAMERA_SEGMENT_SECONDS=0` to return to continuous capture.
 
 You can also test the virtual webcam without the service:
 
@@ -144,15 +195,26 @@ prompt.
 
 If `canon-webcam doctor` says the camera is detected but not responding to PTP
 commands, turn the camera off, unplug USB, wait a few seconds, turn the camera
-back on in movie/live-view mode, reconnect USB, and run `canon-webcam start`
-again.
+back on in movie/live-view mode, and reconnect USB. If the service is already
+running, it should reconnect automatically within a few seconds.
+
+Before each capture attempt, `canon-webcam` stops common desktop camera
+claimers, including GNOME/GVFS gphoto helpers and KDE KIO camera/MTP workers.
+For EOS bodies such as the Canon EOS 7D Mark II, it also prepares live view with
+`capturetarget=0` and `eosviewfinder=1` before starting movie capture. If that
+setup causes trouble on another camera body, disable it:
+
+```bash
+canon-webcam install --no-set-viewfinder
+canon-webcam restart
+```
 
 If `gphoto2` does not detect the camera, check that the USB cable carries data,
 the camera is on, Wi-Fi mode is off, and the camera is in PTP/PC Remote mode if
 prompted.
 
-If another desktop component grabs the camera, the script stops
-`gvfsd-gphoto2` for the current user before streaming.
+If another desktop component grabs the camera, the script stops common GNOME and
+KDE camera helpers for the current user before streaming.
 
 Some Canon models do not expose live-view movie capture through `gphoto2`. Those
 models will still be detected by `gphoto2`, but `canon-webcam stream` will fail
