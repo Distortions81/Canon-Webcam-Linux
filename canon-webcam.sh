@@ -36,12 +36,12 @@ CAMERA_SEGMENT_SECONDS="${CANON_WEBCAM_CAMERA_SEGMENT_SECONDS:-$DEFAULT_CAMERA_S
 SET_VIEWFINDER="${CANON_WEBCAM_SET_VIEWFINDER:-$DEFAULT_SET_VIEWFINDER}"
 DEVICE="${CANON_WEBCAM_DEVICE:-}"
 DEVICE_EXPLICIT=0
-ENABLE_SERVICE=0
 START_SERVICE=0
 TEST_SOURCE_PID=""
 CAMERA_GPHOTO_PID=""
 LOOPBACK_WRITER_PID=""
 CAMERA_FIFO=""
+CAMERA_FIFO_DIR=""
 CAMERA_FIFO_HOLD_FD=""
 
 log() {
@@ -60,30 +60,38 @@ die() {
 usage() {
   cat <<'USAGE'
 Usage:
-  canon-webcam install [--video-nr N] [--label NAME] [--width PX] [--height PX] [--fps N] [--camera-fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder] [--enable] [--start]
-  canon-webcam stream  [--device /dev/videoN] [--label NAME] [--width PX] [--height PX] [--fps N] [--camera-fps N] [--loopback-buffers N] [--set-viewfinder|--no-set-viewfinder]
-  canon-webcam start|stop|restart|hard-reset|status|logs|doctor|reset-loopback|test-source|install-launchers|remove-launchers|uninstall
+  canon-webcam install [options] [--start]
+  canon-webcam stream [options]
+  canon-webcam start|stop|restart|hard-reset|status|logs|doctor
+  canon-webcam reset-loopback|test-source|install-launchers|remove-launchers|uninstall
 
-What it does:
-  install   Install packages, configure v4l2loopback, install a user service.
-  stream    Run the Canon camera -> gphoto2 -> ffmpeg -> virtual webcam pipeline in the foreground.
-  start     Start the systemd user service.
-  stop      Stop the systemd user service.
-  restart   Restart the systemd user service.
-  hard-reset
-            Stop service, clear this app's capture processes, reload loopback, and start service.
-  status    Show the systemd user service status.
-  logs      Follow service logs.
-  doctor    Check dependencies, loopback device, service, and camera detection.
-  reset-loopback
-            Stop the service, reload v4l2loopback with sudo/pkexec, and verify it is writable.
-  test-source
-            Stream a generated test pattern to the virtual webcam.
-  install-launchers
-            Install or refresh Kubuntu/Plasma application launcher entries.
-  remove-launchers
-            Remove Kubuntu/Plasma application launcher entries.
-  uninstall Remove files created by this script. Packages are left installed.
+Commands:
+  install             Install packages, v4l2loopback config, launchers, and user service.
+  stream              Run the Canon -> gphoto2 -> ffmpeg -> virtual webcam pipeline.
+  start               Start the systemd user service.
+  stop                Stop the systemd user service.
+  restart             Restart the systemd user service.
+  hard-reset          Stop service, clear stale capture processes, reload loopback, restart.
+  status              Show systemd user service status.
+  logs                Follow service logs.
+  doctor              Check dependencies, loopback, service, and camera detection.
+  reset-loopback      Reload v4l2loopback and verify the virtual webcam is writable.
+  test-source         Stream a generated test pattern to the virtual webcam.
+  install-launchers   Install or refresh Kubuntu/Plasma application launchers.
+  remove-launchers    Remove Kubuntu/Plasma application launchers.
+  uninstall           Remove installed files. Packages are left installed.
+
+Options:
+  --device /dev/videoN       Virtual webcam device. Install also accepts --video-nr N.
+  --video-nr N               Virtual webcam number for install-time loopback config.
+  --label NAME               Camera label shown to video apps.
+  --width PX --height PX     Output frame size.
+  --camera-fps N             Expected Canon live-view input FPS.
+  --fps N                    Virtual webcam output FPS.
+  --loopback-buffers N       v4l2loopback queue size, minimum 2.
+  --set-viewfinder           Prepare Canon EOS live view before capture.
+  --no-set-viewfinder        Skip Canon EOS live-view preparation.
+  --start                    Start the service after install.
 
 Defaults:
   Virtual webcam: /dev/video42
@@ -95,6 +103,12 @@ Defaults:
 
 Run install as your regular desktop user. The script will ask for sudo only for
 system package and kernel module setup.
+
+Examples:
+  ./canon-webcam.sh install --start
+  canon-webcam doctor
+  canon-webcam stream --width 640 --height 480
+  canon-webcam hard-reset
 USAGE
 }
 
@@ -151,7 +165,7 @@ parse_args() {
         shift
         ;;
       --enable)
-        ENABLE_SERVICE=1
+        warn "--enable is no longer needed; install enables the user service by default"
         shift
         ;;
       --start)
@@ -306,6 +320,12 @@ install_packages() {
 install_binary() {
   local self
   self="$(readlink -f "${BASH_SOURCE[0]}")"
+
+  if [[ "$self" == "$INSTALL_PATH" ]]; then
+    log "Command already installed at $INSTALL_PATH"
+    return
+  fi
+
   log "Installing command to $INSTALL_PATH"
   run_privileged install -m 0755 "$self" "$INSTALL_PATH"
 }
@@ -657,7 +677,6 @@ install_all() {
   systemctl_user enable "$SERVICE_NAME"
 
   if [[ "$START_SERVICE" -eq 1 ]]; then
-    log "Starting $SERVICE_NAME"
     service_start
   fi
 
@@ -818,7 +837,8 @@ start_loopback_writer() {
 
   stop_orphaned_test_source_feeders
 
-  CAMERA_FIFO="$(mktemp -u)"
+  CAMERA_FIFO_DIR="$(mktemp -d)"
+  CAMERA_FIFO="$CAMERA_FIFO_DIR/camera.mjpeg"
   mkfifo "$CAMERA_FIFO"
 
   exec {CAMERA_FIFO_HOLD_FD}<>"$CAMERA_FIFO"
@@ -913,6 +933,11 @@ stop_camera_stream_processes() {
   if [[ -n "${CAMERA_FIFO:-}" ]]; then
     rm -f "$CAMERA_FIFO"
     CAMERA_FIFO=""
+  fi
+
+  if [[ -n "${CAMERA_FIFO_DIR:-}" ]]; then
+    rmdir "$CAMERA_FIFO_DIR" >/dev/null 2>&1 || true
+    CAMERA_FIFO_DIR=""
   fi
 }
 
@@ -1040,15 +1065,18 @@ service_start() {
   ensure_runtime_installed_current
 
   if systemctl_user is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+    log "$SERVICE_NAME is already running"
     return 0
   fi
 
   ensure_loopback_for_writer
   systemctl_user reset-failed "$SERVICE_NAME" >/dev/null 2>&1 || true
+  log "Starting $SERVICE_NAME"
   systemctl_user start "$SERVICE_NAME"
 }
 
 service_stop() {
+  log "Stopping $SERVICE_NAME"
   systemctl_user stop "$SERVICE_NAME"
 }
 
@@ -1067,7 +1095,6 @@ service_hard_reset() {
   log "Reloading v4l2loopback for $DEVICE"
   reset_loopback
 
-  log "Starting $SERVICE_NAME"
   service_start
 }
 
