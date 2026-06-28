@@ -54,6 +54,29 @@ canon-webcam logs
 canon-webcam stop
 ```
 
+## Disable Autostart
+
+The installer enables `canon-webcam.service` as a systemd user service. Disable
+and stop it without removing the install:
+
+```bash
+systemctl --user disable --now canon-webcam.service
+```
+
+After that, start it manually when needed:
+
+```bash
+canon-webcam start
+```
+
+The installer also tries to enable systemd user lingering so the service can run
+after boot before you log in. If you do not need any user services before login,
+disable lingering too:
+
+```bash
+sudo loginctl disable-linger "$USER"
+```
+
 Run the pipeline in the foreground when you want direct terminal output:
 
 ```bash
