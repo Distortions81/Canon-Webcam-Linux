@@ -54,19 +54,26 @@ canon-webcam logs
 canon-webcam stop
 ```
 
-## Disable Autostart
+## Use On Demand Without Autostart
 
-The installer enables `canon-webcam.service` as a systemd user service. Disable
-and stop it without removing the install:
+If you want to keep `canon-webcam` installed but avoid the background CPU use
+when you are not on calls, disable the autostarted user service:
 
 ```bash
 systemctl --user disable --now canon-webcam.service
 ```
 
-After that, start it manually when needed:
+This keeps the command, virtual webcam config, and desktop launchers installed.
+Start the service manually when you need the camera:
 
 ```bash
 canon-webcam start
+```
+
+Stop it after the call:
+
+```bash
+canon-webcam stop
 ```
 
 The installer also tries to enable systemd user lingering so the service can run
